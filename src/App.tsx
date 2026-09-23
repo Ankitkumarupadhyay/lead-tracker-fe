@@ -1,122 +1,267 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import './App.css'
+import React, { useCallback, useEffect, useState } from 'react';
+import type { CreateLeadPayload, Lead, LeadStats, LeadStatus } from './types/lead';
+import { leadsApi } from './api/leadsApi';
+import { useDebounce } from './hooks/useDebounce';
+import { Header } from './components/Header';
+import { StatsDashboard } from './components/StatsDashboard';
+import { FilterBar } from './components/FilterBar';
+import { LeadTable } from './components/LeadTable';
+import { Pagination } from './components/Pagination';
+import { CreateLeadModal } from './components/CreateLeadModal';
+import { ToastContainer, type ToastMessage } from './components/Toast';
 
-function App() {
-  const [count, setCount] = useState(0)
+export const App: React.FC = () => {
+  // Theme state
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    const saved = localStorage.getItem('stylework_theme');
+    if (saved === 'dark' || saved === 'light') return saved;
+    return window.matchMedia('(prefers-color-scheme: dark)').matches
+      ? 'dark'
+      : 'light';
+  });
+
+  // Data state
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [stats, setStats] = useState<LeadStats | null>(null);
+
+  // Filter & Pagination state
+  const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearch = useDebounce(searchQuery, 350);
+  const [selectedStatus, setSelectedStatus] = useState<LeadStatus | ''>('');
+  const [sortBy, setSortBy] = useState<string>('createdAt');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [itemsPerPage, setItemsPerPage] = useState<number>(10);
+  const [totalPages, setTotalPages] = useState<number>(1);
+  const [totalItems, setTotalItems] = useState<number>(0);
+
+  // Loading & Action state
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [isBackendHealthy, setIsBackendHealthy] = useState<boolean | null>(null);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
+  const [updatingLeadId, setUpdatingLeadId] = useState<string | null>(null);
+
+  // Toast notifications
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const addToast = (
+    type: 'success' | 'error' | 'info',
+    title: string,
+    description?: string,
+  ) => {
+    const id = Date.now().toString() + Math.random().toString(36).substring(2, 5);
+    setToasts((prev) => [...prev, { id, type, title, description }]);
+  };
+
+  const removeToast = (id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  };
+
+  // Sync theme with HTML root attribute
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('stylework_theme', theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  };
+
+  // Fetch leads from API
+  const loadLeads = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      const res = await leadsApi.getLeads({
+        q: debouncedSearch,
+        status: selectedStatus,
+        page: currentPage,
+        limit: itemsPerPage,
+        sortBy,
+        sortOrder,
+      });
+
+      setLeads(res.data);
+      setTotalItems(res.meta.total);
+      setTotalPages(res.meta.totalPages);
+      setIsBackendHealthy(true);
+    } catch (err: any) {
+      setIsBackendHealthy(false);
+      addToast(
+        'error',
+        'Failed to load leads',
+        err.message || 'Could not connect to the API server.',
+      );
+    } finally {
+      setIsLoading(false);
+      setIsRefreshing(false);
+    }
+  }, [debouncedSearch, selectedStatus, currentPage, itemsPerPage, sortBy, sortOrder]);
+
+  // Fetch statistics
+  const loadStats = useCallback(async () => {
+    try {
+      const data = await leadsApi.getStats();
+      setStats(data);
+      setIsBackendHealthy(true);
+    } catch {
+      // stats error handled silently or with fallback
+    }
+  }, []);
+
+  // Initial load & when parameters change
+  useEffect(() => {
+    loadLeads();
+  }, [loadLeads]);
+
+  useEffect(() => {
+    loadStats();
+  }, [loadStats]);
+
+  // Reset to page 1 whenever search query or status filter changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedSearch, selectedStatus]);
+
+  // Handle manual refresh
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    await Promise.all([loadLeads(), loadStats()]);
+  };
+
+  // Handle lead creation
+  const handleCreateLead = async (payload: CreateLeadPayload) => {
+    try {
+      const created = await leadsApi.createLead(payload);
+      addToast(
+        'success',
+        'Lead Created Successfully',
+        `Added "${created.name}" as ${created.status} lead.`,
+      );
+      // Reload list and stats
+      await Promise.all([loadLeads(), loadStats()]);
+    } catch (err: any) {
+      addToast(
+        'error',
+        'Failed to create lead',
+        err.message || 'Please check the entered values and try again.',
+      );
+      throw err;
+    }
+  };
+
+  // Handle inline status update with optimistic UI
+  const handleUpdateStatus = async (id: string, newStatus: LeadStatus) => {
+    const previousLeads = [...leads];
+    // Optimistic update
+    setLeads((prev) =>
+      prev.map((lead) =>
+        lead._id === id ? { ...lead, status: newStatus } : lead,
+      ),
+    );
+
+    try {
+      setUpdatingLeadId(id);
+      const updated = await leadsApi.updateStatus(id, { status: newStatus });
+      addToast(
+        'success',
+        'Status Updated',
+        `Lead "${updated.name}" is now marked as ${updated.status}.`,
+      );
+      // Refresh stats
+      loadStats();
+    } catch (err: any) {
+      // Revert optimistic update
+      setLeads(previousLeads);
+      addToast(
+        'error',
+        'Failed to update status',
+        err.message || 'An error occurred while updating status.',
+      );
+    } finally {
+      setUpdatingLeadId(null);
+    }
+  };
+
+  const handleClearFilters = () => {
+    setSearchQuery('');
+    setSelectedStatus('');
+  };
+
+  const handleSortChange = (newSortBy: string, newSortOrder: 'asc' | 'desc') => {
+    setSortBy(newSortBy);
+    setSortOrder(newSortOrder);
+    setCurrentPage(1);
+  };
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+    <div className="app-wrapper">
+      <Header
+        onOpenCreateModal={() => setIsCreateModalOpen(true)}
+        isBackendHealthy={isBackendHealthy}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+      />
 
-      <div className="ticks"></div>
+      <main className="main-content">
+        {/* Performance Metrics Dashboard */}
+        <StatsDashboard
+          stats={stats}
+          activeStatus={selectedStatus}
+          onSelectStatus={(st) => setSelectedStatus(st)}
+          isLoading={isLoading}
+        />
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+        {/* Filter, Search & Controls */}
+        <FilterBar
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          selectedStatus={selectedStatus}
+          onStatusChange={setSelectedStatus}
+          sortBy={sortBy}
+          sortOrder={sortOrder}
+          onSortChange={handleSortChange}
+          stats={stats}
+          onRefresh={handleRefresh}
+          isRefreshing={isRefreshing}
+        />
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
-}
+        {/* Leads Table & Cards */}
+        <LeadTable
+          leads={leads}
+          isLoading={isLoading}
+          onUpdateStatus={handleUpdateStatus}
+          updatingLeadId={updatingLeadId}
+          onOpenCreateModal={() => setIsCreateModalOpen(true)}
+          hasFilters={Boolean(searchQuery || selectedStatus)}
+          onClearFilters={handleClearFilters}
+        />
 
-export default App
+        {/* Pagination Controls */}
+        <Pagination
+          currentPage={currentPage}
+          totalPages={totalPages}
+          totalItems={totalItems}
+          itemsPerPage={itemsPerPage}
+          onPageChange={setCurrentPage}
+          onLimitChange={(limit) => {
+            setItemsPerPage(limit);
+            setCurrentPage(1);
+          }}
+        />
+      </main>
+
+      {/* Modal Dialog for Lead Creation */}
+      <CreateLeadModal
+        isOpen={isCreateModalOpen}
+        onClose={() => setIsCreateModalOpen(false)}
+        onSubmit={handleCreateLead}
+      />
+
+      {/* Toast Notifications */}
+      <ToastContainer toasts={toasts} onDismiss={removeToast} />
+    </div>
+  );
+};
+
+export default App;
