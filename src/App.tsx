@@ -56,11 +56,33 @@ export const App: React.FC = () => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
-  // Sync theme with HTML root attribute
+  // Sync theme with HTML root attribute & meta theme-color
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('stylework_theme', theme);
+    const themeColorMeta = document.getElementById('theme-color-meta');
+    if (themeColorMeta) {
+      themeColorMeta.setAttribute('content', theme === 'dark' ? '#090d16' : '#4f46e5');
+    }
   }, [theme]);
+
+  // Dynamic document title based on filters and lead metrics
+  useEffect(() => {
+    const baseTitle = 'LeadFlow — Stylework Lead Tracker';
+    const newCount = stats?.byStatus?.['New'] || 0;
+
+    if (selectedStatus && debouncedSearch) {
+      document.title = `(${selectedStatus} · "${debouncedSearch}") | ${baseTitle}`;
+    } else if (selectedStatus) {
+      document.title = `(${selectedStatus}) | ${baseTitle}`;
+    } else if (debouncedSearch) {
+      document.title = `("${debouncedSearch}") | ${baseTitle}`;
+    } else if (newCount > 0) {
+      document.title = `(${newCount} New) | ${baseTitle}`;
+    } else {
+      document.title = baseTitle;
+    }
+  }, [selectedStatus, debouncedSearch, stats]);
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
